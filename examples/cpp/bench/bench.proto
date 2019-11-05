@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package midhul.bench;
+
+message Request {
+	string key = 1;
+	int32 payload_size = 2;
+}
+
+message Response {
+	string key = 1;
+	bytes payload = 2;
+}
+
+service BenchService {
+	rpc UnaryCall (Request) returns (Response) {}
+}
