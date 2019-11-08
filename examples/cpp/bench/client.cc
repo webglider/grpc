@@ -160,7 +160,8 @@ class BenchClientPoller
 
 public:
     explicit BenchClientPoller(int target_responses, int payload_length) 
-    : target_responses_(target_responses), payload_length_(payload_length) {}
+    : target_responses_(target_responses), payload_length_(payload_length), 
+    total_responses_(0), success_responses_(0) {}
 
     // Loop while listening for completed responses.
     // Runs until target responses have been received
