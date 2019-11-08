@@ -48,7 +48,7 @@ static void init_num_cpus() {
      determined */
   char *cores_override = getenv("GRPC_CORES_OVERRIDE");
   if(cores_override != NULL) {
- 	x = atoi(cores_override);
+ 	int x = atoi(cores_override);
 	if(x > 0) {
 		gpr_log(GPR_INFO, "Found valid number of cores override: %d\n", x);
 		ncpus = x;
