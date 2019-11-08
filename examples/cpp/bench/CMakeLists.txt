@@ -27,7 +27,7 @@ else()
   add_definitions(-D_WIN32_WINNT=0x600)
 endif()
 
-if(GRPC_AS_SUBMODULE)
+# if(GRPC_AS_SUBMODULE)
   # One way to build a projects that uses gRPC is to just include the
   # entire gRPC project tree via "add_subdirectory".
   # This approach is very simple to use, but the are some potential
@@ -55,27 +55,29 @@ if(GRPC_AS_SUBMODULE)
   set(_PROTOBUF_PROTOC $<TARGET_FILE:protoc>)
   set(_GRPC_GRPCPP_UNSECURE grpc++_unsecure)
   set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:grpc_cpp_plugin>)
-else()
-  # This branch assumes that gRPC and all its dependencies are already installed
-  # on this system, so they can be located by find_package().
+  set(_GRPC_GFLAGS_LIBRARIES gflags::gflags)
+  set(_GRPC_GFLAGS_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/third_party/gflags/include")
+# else()
+#   # This branch assumes that gRPC and all its dependencies are already installed
+#   # on this system, so they can be located by find_package().
 
-  # Find Protobuf installation
-  # Looks for protobuf-config.cmake file installed by Protobuf's cmake installation.
-  set(protobuf_MODULE_COMPATIBLE TRUE)
-  find_package(Protobuf CONFIG REQUIRED)
-  message(STATUS "Using protobuf ${protobuf_VERSION}")
+#   # Find Protobuf installation
+#   # Looks for protobuf-config.cmake file installed by Protobuf's cmake installation.
+#   set(protobuf_MODULE_COMPATIBLE TRUE)
+#   find_package(Protobuf CONFIG REQUIRED)
+#   message(STATUS "Using protobuf ${protobuf_VERSION}")
 
-  set(_PROTOBUF_LIBPROTOBUF protobuf::libprotobuf)
-  set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+#   set(_PROTOBUF_LIBPROTOBUF protobuf::libprotobuf)
+#   set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 
-  # Find gRPC installation
-  # Looks for gRPCConfig.cmake file installed by gRPC's cmake installation.
-  find_package(gRPC CONFIG REQUIRED)
-  message(STATUS "Using gRPC ${gRPC_VERSION}")
+#   # Find gRPC installation
+#   # Looks for gRPCConfig.cmake file installed by gRPC's cmake installation.
+#   find_package(gRPC CONFIG REQUIRED)
+#   message(STATUS "Using gRPC ${gRPC_VERSION}")
 
-  set(_GRPC_GRPCPP_UNSECURE gRPC::grpc++_unsecure)
-  set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
-endif()
+#   set(_GRPC_GRPCPP_UNSECURE gRPC::grpc++_unsecure)
+#   set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+# endif()
 
 # Proto file
 get_filename_component(hw_proto "./bench.proto" ABSOLUTE)
@@ -97,7 +99,7 @@ add_custom_command(
       DEPENDS "${hw_proto}")
 
 # Include generated *.pb.h files
-include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+include_directories("${CMAKE_CURRENT_BINARY_DIR}" "${_GRPC_GFLAGS_INCLUDE_DIR}")
 
 # Targets greeter_[async_](client|server)
 foreach(_target
@@ -107,5 +109,8 @@ foreach(_target
     ${hw_grpc_srcs})
   target_link_libraries(${_target}
     ${_GRPC_GRPCPP_UNSECURE}
-    ${_PROTOBUF_LIBPROTOBUF})
+    ${_PROTOBUF_LIBPROTOBUF}
+    ${_GRPC_GFLAGS_LIBRARIES})
 endforeach()
+
+add_executable(getnumcores "getnumcores.cc")

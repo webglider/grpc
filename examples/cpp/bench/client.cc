@@ -5,7 +5,10 @@
 
 #include <grpcpp/grpcpp.h>
 #include <grpc/support/log.h>
+#include <gflags/gflags.h>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "bench.grpc.pb.h"
 
@@ -19,15 +22,73 @@ using midhul::bench::Request;
 using midhul::bench::Response;
 using midhul::bench::BenchService;
 
-const int c_payload_len = 4096;
-const int c_outstanding_rpcs = 100;
-const int c_target_rpcs = 5000000;
 
-class BenchClient {
+DEFINE_int32(payload_length, 4096, "Length of response payload in bytes");
+DEFINE_int32(outstanding_rpcs, 100, "Maximum number of outstanding RPCs per sender thread");
+DEFINE_int32(target_rpcs, 1000000, "Target number of RPCs to be sent");
+DEFINE_string(server_host, "0.0.0.0", "Server IP address");
+DEFINE_string(server_port, "50051", "Server port");
+
+class Semaphore
+{
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    unsigned long count_ = 0; // Initialized as locked.
+
+public:
+    explicit Semaphore(int capacity) : count_(capacity) {}
+
+    void notify() {
+        std::lock_guard<decltype(mutex_)> lock(mutex_);
+        ++count_;
+        condition_.notify_one();
+    }
+
+    void wait() {
+        std::unique_lock<decltype(mutex_)> lock(mutex_);
+        while(!count_) // Handle spurious wake-ups.
+            condition_.wait(lock);
+        --count_;
+    }
+
+    bool try_wait() {
+        std::lock_guard<decltype(mutex_)> lock(mutex_);
+        if(count_) {
+            --count_;
+            return true;
+        }
+        return false;
+    }
+};
+
+class BenchClientSender;
+
+// struct for keeping state and data information
+struct AsyncClientCall {
+    // Container for the data we expect from the server.
+    Response reply;
+
+    // Context for the client. It could be used to convey extra information to
+    // the server and/or tweak certain RPC behaviors.
+    ClientContext context;
+
+    // Storage for the status of the RPC upon completion.
+    Status status;
+
+
+    std::unique_ptr<ClientAsyncResponseReader<Response>> response_reader;
+
+    // Sender object that created this call
+    BenchClientSender *sender;
+};
+
+class BenchClientSender {
   public:
-    explicit BenchClient(std::shared_ptr<Channel> channel)
+    explicit BenchClientSender(std::shared_ptr<Channel> channel, CompletionQueue *cq, int target_rpcs, int max_outstanding, int payload_length)
             : stub_(BenchService::NewStub(channel)), sent_requests_(0), 
-            total_responses_(0), success_responses_(0) {}
+            max_outstanding_(max_outstanding), target_rpcs_(target_rpcs),
+            payload_length_(payload_length), sem_(max_outstanding), cq_(cq) {}
 
     // Assembles the client's payload and sends it to the server.
     void SendRequest(const std::string& key, int resp_len) {
@@ -38,13 +99,14 @@ class BenchClient {
 
         // Call object to store rpc data
         AsyncClientCall* call = new AsyncClientCall;
+        call->sender = this;
 
         // stub_->PrepareAsyncSayHello() creates an RPC object, returning
         // an instance to store in "call" but does not actually start the RPC
         // Because we are using the asynchronous API, we need to hold on to
         // the "call" instance in order to get updates on the ongoing RPC.
         call->response_reader =
-            stub_->PrepareAsyncUnaryCall(&call->context, request, &cq_);
+            stub_->PrepareAsyncUnaryCall(&call->context, request, cq_);
 
         // StartCall initiates the RPC call
         call->response_reader->StartCall();
@@ -54,13 +116,55 @@ class BenchClient {
         // was successful. Tag the request with the memory address of the call object.
         call->response_reader->Finish(&call->reply, &call->status, (void*)call);
 
-        sent_requests_ += 1;
+    }
+
+    // Notify completion of RPC
+    void NotifyCompletion()
+    {
+        sem_.notify();
+    }
+
+    void SendLoop() {
+
+        // Keep sending RPCs until we reach the target
+        while(sent_requests_ < target_rpcs_)
+        {
+            sem_.wait();
+            SendRequest("midhul", payload_length_);
+            sent_requests_ += 1;
+        }
 
     }
 
+  private:
+
+    // Out of the passed in Channel comes the stub, stored here, our view of the
+    // server's exposed services.
+    std::unique_ptr<BenchService::Stub> stub_;
+
+    int sent_requests_;
+
+    int max_outstanding_;
+
+    int target_rpcs_;
+
+    int payload_length_;
+
+    Semaphore sem_;
+
+    CompletionQueue *cq_;
+};
+
+class BenchClientPoller
+{
+
+public:
+    explicit BenchClientPoller(int target_responses, int payload_length) 
+    : target_responses_(target_responses), payload_length_(payload_length) {}
+
     // Loop while listening for completed responses.
-    // Runs untill target responses have been received
-    void AsyncCompleteRpc(int target) {
+    // Runs until target responses have been received
+    void PollCompletionQueue() {
         void* got_tag;
         bool ok = false;
 
@@ -75,45 +179,41 @@ class BenchClient {
 
             total_responses_ += 1;
             if (call->status.ok())
+            {
+                GPR_ASSERT(call->reply.payload().size() == payload_length_);
                 success_responses_ += 1;
+            }
+            else
+            {
+                std::cout << "RPC failed: " << call->status.error_code() << " " << call->status.error_message() << std::endl;
+            }
+            
+
+            // Notify corresponding sender
+            call->sender->NotifyCompletion();
 
             // Once we're complete, deallocate the call object.
             delete call;
 
-            if(sent_requests_ < target)
-            {
-                // Send another request
-                SendRequest("midhul", c_payload_len);
-            }
-
-            if(total_responses_ == target)
+            if(total_responses_ == target_responses_)
             {
                 break;
             }
         }
     }
 
-  private:
+    // Explosing the cq
+    CompletionQueue *GetCompletionQueue()
+    {
+        return &cq_;
+    }
 
-    // struct for keeping state and data information
-    struct AsyncClientCall {
-        // Container for the data we expect from the server.
-        Response reply;
+    int GetNumSuccessfulResponses()
+    {
+        return success_responses_;
+    }
 
-        // Context for the client. It could be used to convey extra information to
-        // the server and/or tweak certain RPC behaviors.
-        ClientContext context;
-
-        // Storage for the status of the RPC upon completion.
-        Status status;
-
-
-        std::unique_ptr<ClientAsyncResponseReader<Response>> response_reader;
-    };
-
-    // Out of the passed in Channel comes the stub, stored here, our view of the
-    // server's exposed services.
-    std::unique_ptr<BenchService::Stub> stub_;
+private:
 
     // The producer-consumer queue we use to communicate asynchronously with the
     // gRPC runtime.
@@ -123,40 +223,47 @@ class BenchClient {
 
     int success_responses_;
 
-    int sent_requests_;
+    int target_responses_;
+
+    int payload_length_;
+
 };
 
 int main(int argc, char** argv) {
 
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    // Instantiate the client. It requires a channel, out of which the actual RPCs
-    // are created. This channel models a connection to an endpoint (in this case,
-    // localhost at port 50051). We indicate that the channel isn't authenticated
-    // (use of InsecureChannelCredentials()).
-    BenchClient bclient(grpc::CreateChannel(
-            "localhost:50051", grpc::InsecureChannelCredentials()));
+    std::string server_addr = FLAGS_server_host + ":" + FLAGS_server_port;
 
-    // Spawn reader thread that loops indefinitely
-    // std::thread thread_ = std::thread(&BenchClient::AsyncCompleteRpc, &bclient);
+    // Create poller
+    BenchClientPoller poller(FLAGS_target_rpcs, FLAGS_payload_length);
+
+    BenchClientSender sender(grpc::CreateChannel(
+            server_addr, grpc::InsecureChannelCredentials()), 
+            poller.GetCompletionQueue(), 
+            FLAGS_target_rpcs, 
+            FLAGS_outstanding_rpcs, 
+            FLAGS_payload_length);
+
+    // Spawn poller thread
+    std::thread poller_thread_ = std::thread(&BenchClientPoller::PollCompletionQueue, &poller);
 
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    for (int i = 0; i < c_outstanding_rpcs; i++) {
-        bclient.SendRequest("midhul", c_payload_len);  // The actual RPC call!
-    }
+    // Spawn sender thread
+    std::thread sender_thread_ = std::thread(&BenchClientSender::SendLoop, &sender);
 
-    // std::cout << "Press control-c to quit" << std::endl << std::endl;
-    // thread_.join();  //blocks forever
-
-
-    bclient.AsyncCompleteRpc(c_target_rpcs);
+    // wait for sender and poller ot exit
+    sender_thread_.join();
+    poller_thread_.join();
 
     auto t2 = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> time_taken = t2 - t1;
     double secs = time_taken.count();
 
-    std::cout << "Throughput: " << ((double)c_target_rpcs/secs) << " rpcs/sec" << std::endl;
+    std::cout << "Throughput: " << ((double)FLAGS_target_rpcs/secs) << " rpcs/sec" << std::endl;
+    std::cout << "# Successful responses: " << poller.GetNumSuccessfulResponses() << std::endl;
 
 
     return 0;

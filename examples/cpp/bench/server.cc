@@ -1,9 +1,11 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <fstream>
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
+#include <gflags/gflags.h>
 
 #include "bench.grpc.pb.h"
 
@@ -15,7 +17,10 @@ using midhul::bench::Request;
 using midhul::bench::Response;
 using midhul::bench::BenchService;
 
-const int c_max_threads = 1;
+DEFINE_string(host, "0.0.0.0", "Host IP address");
+DEFINE_string(port, "50051", "Server port");
+
+// const int c_max_threads = 8;
 
 const int c_max_payload_size = 16*1024*1024;
 unsigned char dummy_bytes[c_max_payload_size];
@@ -33,17 +38,17 @@ class BenchServiceImpl final : public BenchService::Service {
   }
 };
 
-void RunServer() {
-  std::string server_address("0.0.0.0:50051");
+void RunServer(std::string host, std::string port) {
+  std::string server_address(host + ":" + port);
   BenchServiceImpl service;
 
   ServerBuilder builder;
-  grpc::ResourceQuota rq;
-  rq.SetMaxThreads(c_max_threads);
-  builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, 1);
-  builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MIN_POLLERS, 1);
-  builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MAX_POLLERS, 1);
-  builder.SetResourceQuota(rq);
+  // grpc::ResourceQuota rq;
+  // rq.SetMaxThreads(c_max_threads);
+  // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, 1);
+  // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MIN_POLLERS, 1);
+  // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MAX_POLLERS, 1);
+  // builder.SetResourceQuota(rq);
   // Listen on the given address without any authentication mechanism.
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   // Register "service" as the instance through which we'll communicate with
@@ -59,7 +64,17 @@ void RunServer() {
 }
 
 int main(int argc, char** argv) {
-  RunServer();
+
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+  // Initialize dummy bytes with random bytes
+  std::ifstream urandom("/dev/urandom", std::ios::in | std::ios::binary);
+  GPR_ASSERT(urandom);
+  urandom.read(reinterpret_cast<char*>(dummy_bytes), c_max_payload_size);
+  urandom.close();
+  std::cout << "Initialized random bytes" << dummy_bytes[0] << " " << dummy_bytes[1] << std::endl;
+
+  RunServer(FLAGS_host, FLAGS_port);
 
   return 0;
 }
