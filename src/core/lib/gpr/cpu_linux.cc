@@ -28,6 +28,7 @@
 #include <sched.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <grpc/support/cpu.h>
 #include <grpc/support/log.h>
@@ -45,6 +46,15 @@ static void init_num_cpus() {
 #endif
   /* This must be signed. sysconf returns -1 when the number cannot be
      determined */
+  char *cores_override = getenv("GRPC_CORES_OVERRIDE");
+  if(cores_override != NULL) {
+ 	x = atoi(cores_override);
+	if(x > 0) {
+		gpr_log(GPR_INFO, "Found valid number of cores override: %d\n", x);
+		ncpus = x;
+		return;
+	}
+  }
   ncpus = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
   if (ncpus < 1) {
     gpr_log(GPR_ERROR, "Cannot determine number of CPUs: assuming 1");
