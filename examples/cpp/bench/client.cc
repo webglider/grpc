@@ -2,6 +2,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 #include <grpc/support/log.h>
@@ -28,6 +29,9 @@ DEFINE_int32(outstanding_rpcs, 100, "Maximum number of outstanding RPCs per send
 DEFINE_int32(target_rpcs, 1000000, "Target number of RPCs to be sent");
 DEFINE_string(server_host, "0.0.0.0", "Server IP address");
 DEFINE_string(server_port, "50051", "Server port");
+DEFINE_int32(num_senders, 1, "Number of sender threads");
+DEFINE_int32(num_pollers, 1, "Number of poller threads");
+DEFINE_int32(num_channels, 1, "Number of channels");
 
 class Semaphore
 {
@@ -86,7 +90,7 @@ struct AsyncClientCall {
 class BenchClientSender {
   public:
     explicit BenchClientSender(std::shared_ptr<Channel> channel, CompletionQueue *cq, int target_rpcs, int max_outstanding, int payload_length)
-            : stub_(BenchService::NewStub(channel)), sent_requests_(0), 
+            : stub_(BenchService::NewStub(channel)), channel_(channel), sent_requests_(0), 
             max_outstanding_(max_outstanding), target_rpcs_(target_rpcs),
             payload_length_(payload_length), sem_(max_outstanding), cq_(cq) {}
 
@@ -126,6 +130,8 @@ class BenchClientSender {
 
     void SendLoop() {
 
+        gpr_log(GPR_INFO, "Sender send loop starting. Channel: %p, CQ: %p", (void*)(channel_.get()), (void *)(cq_));
+
         // Keep sending RPCs until we reach the target
         while(sent_requests_ < target_rpcs_)
         {
@@ -153,6 +159,8 @@ class BenchClientSender {
     Semaphore sem_;
 
     CompletionQueue *cq_;
+
+    std::shared_ptr<Channel> channel_;
 };
 
 class BenchClientPoller
@@ -166,6 +174,14 @@ public:
     // Loop while listening for completed responses.
     // Runs until target responses have been received
     void PollCompletionQueue() {
+
+        gpr_log(GPR_INFO, "Poller poll loop starting. CQ: %p, target_responses: %d", (void*)(&cq_), target_responses_);
+
+        if(total_responses_ == target_responses_)
+        {
+            return;
+        }
+
         void* got_tag;
         bool ok = false;
 
@@ -234,37 +250,97 @@ int main(int argc, char** argv) {
 
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
+    GPR_ASSERT(FLAGS_num_channels >= FLAGS_num_pollers);
+
     std::string server_addr = FLAGS_server_host + ":" + FLAGS_server_port;
 
-    // Create poller
-    BenchClientPoller poller(FLAGS_target_rpcs, FLAGS_payload_length);
+    // Calculate # of target responses per poller
+    std::vector<int> senders_per_poller(FLAGS_num_pollers, 0);
+    for(int i = 0; i < FLAGS_num_senders; i++)
+    {
+        int channel_idx = i % FLAGS_num_channels;
+        int poller_idx = channel_idx % FLAGS_num_pollers;
+        senders_per_poller[poller_idx] += 1;
 
-    BenchClientSender sender(grpc::CreateChannel(
-            server_addr, grpc::InsecureChannelCredentials()), 
-            poller.GetCompletionQueue(), 
-            FLAGS_target_rpcs, 
+    }
+
+    // Create pollers
+    std::vector<std::unique_ptr<BenchClientPoller>> pollers;
+    for(int i = 0; i < FLAGS_num_pollers; i++)
+    {
+        pollers.push_back(std::unique_ptr<BenchClientPoller>(
+            new BenchClientPoller(FLAGS_target_rpcs * senders_per_poller[i], FLAGS_payload_length))
+            );
+    }
+
+    // Create channels
+    std::vector<std::shared_ptr<Channel>> channels;
+    for(int i = 0; i < FLAGS_num_channels; i++)
+    {
+        grpc::ChannelArguments args;
+        args.SetInt("shard_to_ensure_no_subchannel_merges", i);
+        channels.push_back(grpc::CreateCustomChannel(server_addr, grpc::InsecureChannelCredentials(), args));
+    }
+
+
+    // Create senders
+    std::vector<std::unique_ptr<BenchClientSender>> senders;
+    for(int i = 0; i < FLAGS_num_senders; i++)
+    {
+        int channel_idx = i % FLAGS_num_channels;
+        int poller_idx = channel_idx % FLAGS_num_pollers;
+
+        senders.push_back(std::unique_ptr<BenchClientSender>(
+            new BenchClientSender(channels[channel_idx], 
+            pollers[poller_idx]->GetCompletionQueue(), 
+            FLAGS_target_rpcs,
             FLAGS_outstanding_rpcs, 
-            FLAGS_payload_length);
+            FLAGS_payload_length))
+            );
+    }
 
-    // Spawn poller thread
-    std::thread poller_thread_ = std::thread(&BenchClientPoller::PollCompletionQueue, &poller);
+    // Spawn poller threads
+    std::vector<std::thread> poller_threads;
+    for(int i = 0; i < FLAGS_num_pollers; i++)
+    {
+        poller_threads.push_back(std::thread(&BenchClientPoller::PollCompletionQueue, pollers[i].get()));
+    }
+    
 
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    // Spawn sender thread
-    std::thread sender_thread_ = std::thread(&BenchClientSender::SendLoop, &sender);
+    // Spawn sender threads
+    std::vector<std::thread> sender_threads;
+    for(int i = 0; i < FLAGS_num_senders; i++)
+    {
+        sender_threads.push_back(std::thread(&BenchClientSender::SendLoop, senders[i].get()));
+    }
+    
 
-    // wait for sender and poller ot exit
-    sender_thread_.join();
-    poller_thread_.join();
+    // wait for senders and pollers to exit
+    for(std::thread & t : sender_threads)
+    {
+        t.join();
+    }
+
+    for(std::thread & t : poller_threads)
+    {
+        t.join();
+    }
 
     auto t2 = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> time_taken = t2 - t1;
     double secs = time_taken.count();
 
-    std::cout << "Throughput: " << ((double)FLAGS_target_rpcs/secs) << " rpcs/sec" << std::endl;
-    std::cout << "# Successful responses: " << poller.GetNumSuccessfulResponses() << std::endl;
+    std::cout << "Throughput: " << (((double)(FLAGS_target_rpcs*FLAGS_num_senders))/secs) << " rpcs/sec" << std::endl;
+
+    int total_success = 0;
+    for(int i = 0; i < FLAGS_num_pollers; i++)
+    {
+        total_success += pollers[i]->GetNumSuccessfulResponses();
+    }
+    std::cout << "# Successful responses: " << total_success << std::endl;
 
 
     return 0;
