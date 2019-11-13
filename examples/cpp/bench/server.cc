@@ -19,6 +19,8 @@ using midhul::bench::BenchService;
 
 DEFINE_string(host, "0.0.0.0", "Host IP address");
 DEFINE_string(port, "50051", "Server port");
+DEFINE_int32(num_cqs, 1, "Number of CQs");
+DEFINE_int32(max_pollers, 2, "Maxmimum pollers");
 
 // const int c_max_threads = 8;
 
@@ -45,9 +47,9 @@ void RunServer(std::string host, std::string port) {
   ServerBuilder builder;
   // grpc::ResourceQuota rq;
   // rq.SetMaxThreads(c_max_threads);
-  // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, 1);
+  builder.SetSyncServerOption(ServerBuilder::SyncServerOption::NUM_CQS, FLAGS_num_cqs);
   // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MIN_POLLERS, 1);
-  // builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MAX_POLLERS, 1);
+  builder.SetSyncServerOption(ServerBuilder::SyncServerOption::MAX_POLLERS, FLAGS_max_pollers);
   // builder.SetResourceQuota(rq);
   // Listen on the given address without any authentication mechanism.
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
