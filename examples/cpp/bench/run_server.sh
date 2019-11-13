@@ -1,3 +1,4 @@
+killall server
 y=$((NUM_CORES-1))
 service irqbalance stop
 set_irq_affinity_cpulist.sh 0-$y eno1
