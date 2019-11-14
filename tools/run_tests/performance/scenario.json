@@ -1,0 +1,51 @@
+{
+    "scenarios": [
+        {
+            "benchmark_seconds": 60,
+            "client_config": {
+                "async_client_threads": 1,
+                "channel_args": [
+                    {
+                        "name": "grpc.optimization_target",
+                        "str_value": "throughput"
+                    }
+                ],
+                "client_channels": 1,
+                "client_type": "ASYNC_CLIENT",
+                "histogram_params": {
+                    "max_possible": 60000000000.0,
+                    "resolution": 0.01
+                },
+                "load_params": {
+                    "closed_loop": {}
+                },
+                "outstanding_rpcs_per_channel": 100,
+                "payload_config": {
+                    "simple_params": {
+                        "req_size": 64,
+                        "resp_size": 4096
+                    }
+                },
+                "rpc_type": "UNARY",
+                "security_params": null,
+                "threads_per_cq": 1
+            },
+            "name": "basic_benchmark",
+            "num_clients": 1,
+            "num_servers": 1,
+            "server_config": {
+                "async_server_threads": 1,
+                "channel_args": [
+                    {
+                        "name": "grpc.optimization_target",
+                        "str_value": "throughput"
+                    }
+                ],
+                "security_params": null,
+                "server_type": "ASYNC_SERVER",
+                "threads_per_cq": 1
+            },
+            "warmup_seconds": 30
+        }
+    ]
+}
